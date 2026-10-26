@@ -446,9 +446,9 @@ class SingleFieldLinearNormalizer(BaseActionStateTransform):
 
         return scale[..., :h_data, :], offset[..., :h_data, :]
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, *, clip: bool = True) -> torch.Tensor:
         if self.mode == "dummy":
-            return x.clamp(self.dummy_clip_min, self.dummy_clip_max)
+            return x.clamp(self.dummy_clip_min, self.dummy_clip_max) if clip else x
 
         scale, offset = self._match_horizon(x)
         feat_dim = scale.shape[-1]
@@ -460,7 +460,7 @@ class SingleFieldLinearNormalizer(BaseActionStateTransform):
         x_main = x_main * scale + offset
         if self.mode == "tanh":
             x_main = torch.tanh(x_main)
-        else:
+        elif clip:
             x_main = x_main.clamp(-5.0, 5.0)
         # Safety net: replace any residual NaN/Inf with 0 to prevent training crashes.
         # Upstream rotation ops are clamped, but raw data corruption can still produce NaN.

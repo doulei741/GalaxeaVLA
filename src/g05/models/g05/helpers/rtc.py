@@ -117,5 +117,15 @@ def normalize_absolute_prefix(processor,obs_dict,absolute_prefix):
             raise ValueError('RTC prefix shape/non-finite mismatch')
         data['action'][key]=torch.cat([value,value[-1:].expand(horizon-length,-1)],dim=0)
     data['action_is_pad']=torch.arange(horizon)>=length
-    processed=processor.preprocess_action_state(data)
+    # A known future action shifted to a new horizon index can exceed that
+    # index's +/-5 training-input range. Clipping would change an already
+    # committed physical target. Preserve the exact invertible normalization
+    # for this prefix only; observation and ordinary model paths are unchanged.
+    data=processor.action_filter.forward(data)
+    data=processor.action_state_transform(data)
+    for domain in ('action','state'):
+        for key,norm in processor.normalizer.normalizers[domain].items():
+            if key in data.get(domain,{}):
+                data[domain][key]=norm.forward(data[domain][key],clip=False) if domain=='action' else norm.forward(data[domain][key])
+    processed=processor.action_state_merger.forward(data)
     return processed['action'][:length].unsqueeze(0)

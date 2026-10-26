@@ -139,7 +139,7 @@ class PolicyInferencer:
                 if delay_steps:
                     max_error = max(max_error, float((actual-reference).abs().max()))
                     if not torch.allclose(actual, reference, rtol=1e-4, atol=2e-4):
-                        raise RuntimeError('RTC committed prefix failed physical-coordinate roundtrip: '+key)
+                        raise RuntimeError(f'RTC committed prefix failed physical-coordinate roundtrip: {key}, max_error={max_error:.8g}')
             timing.update(rtc=True, rtc_prefix_steps=prefix.shape[1], rtc_delay_steps=delay_steps)
             timing['rtc_hard_prefix_max_error'] = max_error
             return results[0], timing

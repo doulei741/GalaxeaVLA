@@ -47,3 +47,11 @@ def test_padded_dimensions_have_no_guidance():
 def test_invalid_delay_is_rejected():
     with pytest.raises(ValueError):
         RTCContext(torch.ones(1,3,2),4)
+
+
+def test_known_prefix_normalization_is_invertible_beyond_training_clip():
+    from g05.utils.data.normalizer import SingleFieldLinearNormalizer
+    norm=SingleFieldLinearNormalizer({'mean':torch.zeros(2),'std':torch.ones(2)},mode='z-score')
+    x=torch.tensor([[8.,-9.]])
+    assert norm.forward(x).abs().max()==5
+    torch.testing.assert_close(norm.backward(norm.forward(x,clip=False)),x)
