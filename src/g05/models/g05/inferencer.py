@@ -112,6 +112,27 @@ class PolicyInferencer:
         """Single obs convenience."""
         return self.infer([obs_dict])[0]
 
+    def infer_rtc(self, obs_dict: dict, absolute_prefix: dict, delay_steps: int,
+                  soft_steps: int = 4, guidance_weight: float = 5.0):
+        """Modified by doulei741, 2026-10-27: full FM-only RTC inference transaction.
+
+        Absolute raw actions are transformed using the new observation state and
+        the exact trained normalization/grouping. Gradients are enabled only in
+        the action sampler, with respect to its current latent, never accumulated
+        into model parameters. Existing unconditioned inference stays unchanged.
+        """
+        from .helpers.rtc import RTCContext, normalize_absolute_prefix, use
+        if not self.policy.continuous_action or self.policy.discrete_action or self.policy.predict_cot:
+            raise ValueError('RTC requires FM-only inference without AR/CoT generation')
+        with self._inference_lock:
+            processor = resolve_processor(self.processor, obs_dict)
+            prefix = normalize_absolute_prefix(processor, obs_dict, absolute_prefix).to(self.device)
+            context = RTCContext(prefix, int(delay_steps), int(soft_steps), float(guidance_weight))
+            with use(context):
+                results, timing = self._infer_with_timing_locked([obs_dict])
+            timing.update(rtc=True, rtc_prefix_steps=prefix.shape[1], rtc_delay_steps=delay_steps)
+            return results[0], timing
+
     def forward_batch(self, batch: dict) -> dict:
         """Core: to device → predict_action → to cpu."""
         batch = dict_apply(batch, lambda x: x.to(self.device) if isinstance(x, torch.Tensor) else x)

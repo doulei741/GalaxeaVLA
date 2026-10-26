@@ -443,9 +443,16 @@ class FMHelper:
         else:
             t = torch.zeros(bsz, device=device, dtype=dtype)
 
-        for _ in range(self.num_inference_steps):
+        # Modified by doulei741, 2026-10-27: optional transaction-scoped RTC.
+        # The ordinary path keeps its original random sampling/integration.
+        from .rtc import current, guided_velocity, project_prefix
+        rtc = current()
+        initial_noise = action.detach().clone() if rtc is not None else None
+        pi_convention = self.time_convention == "pi_convention"
+
+        def velocity_at(value):
             with torch.autocast(device.type, enabled=False):
-                action_embeds = model.action_expert.embed(action.float())
+                action_embeds = model.action_expert.embed(value.float())
                 time_cond = model.action_expert.encode_time(t)
 
             action_hidden = model.action_expert(
@@ -458,7 +465,14 @@ class FMHelper:
                 **ae_kv_kwargs,
             )
 
-            action_vel = model.action_expert.decode(action_hidden)
+            return model.action_expert.decode(action_hidden)
+
+        for _ in range(self.num_inference_steps):
+            if rtc is not None:
+                action = project_prefix(action, initial_noise, t, rtc, pi_convention)
+                action_vel = guided_velocity(action, t, velocity_at, rtc, pi_convention, _pad_mask)
+            else:
+                action_vel = velocity_at(action)
 
             if self.time_convention == "pi_convention":
                 action -= delta_t * action_vel
@@ -474,5 +488,11 @@ class FMHelper:
             action = torch.clamp(
                 action, -self.final_action_clip_value, self.final_action_clip_value
             )
+
+        if rtc is not None:
+            final_time = torch.zeros_like(t) if pi_convention else torch.ones_like(t)
+            action = project_prefix(action, initial_noise, final_time, rtc, pi_convention)
+            if _pad_mask is not None:
+                action.masked_fill_(_pad_mask, 0.0)
 
         return action
