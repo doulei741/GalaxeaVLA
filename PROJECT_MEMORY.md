@@ -19,7 +19,14 @@ active. RTC enables autograd only on the current action latent, BEFORE calling t
 velocity network, and computes a full VJP including its Jacobian. Model parameters
 are not optimized and .grad is not accumulated. The committed prefix follows its
 noise-to-data path and is restored exactly at the final step; a soft suffix uses
-bounded guidance (default5). Both pi and galaxea time conventions are handled.
+bounded guidance. Both pi and galaxea time conventions are handled.
+
+The initial 4090 recorded-observation replay at guidance5 eventually produced an
+out-of-range gripper and correctly stopped. Guidance1 passed a 12-second/24-prediction
+replay with unchanged gripper tolerance; therefore the shipped starting default is1,
+not a blindly copied paper gain. This is one recorded observation, not task-quality
+validation. Every conditioned inference also checks that the committed raw prefix
+survives normalization/relative-coordinate postprocessing within numeric tolerance.
 
 Existing LeRobot RTC code was read as a reference, not copied blindly: its current
 ordering sets requires_grad after evaluating v_t, so the new implementation has an

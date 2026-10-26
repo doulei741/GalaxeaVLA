@@ -18,7 +18,7 @@ class RTCContext:
     prefix: torch.Tensor
     delay_steps: int
     soft_steps: int = 4
-    guidance_weight: float = 5.0
+    guidance_weight: float = 1.0
 
     def __post_init__(self):
         if self.prefix.ndim!=3 or not torch.isfinite(self.prefix).all():

@@ -113,7 +113,7 @@ class PolicyInferencer:
         return self.infer([obs_dict])[0]
 
     def infer_rtc(self, obs_dict: dict, absolute_prefix: dict, delay_steps: int,
-                  soft_steps: int = 4, guidance_weight: float = 5.0):
+                  soft_steps: int = 4, guidance_weight: float = 1.0):
         """Modified by doulei741, 2026-10-27: full FM-only RTC inference transaction.
 
         Absolute raw actions are transformed using the new observation state and
@@ -130,7 +130,18 @@ class PolicyInferencer:
             context = RTCContext(prefix, int(delay_steps), int(soft_steps), float(guidance_weight))
             with use(context):
                 results, timing = self._infer_with_timing_locked([obs_dict])
+            # Verify the entire processor roundtrip, including relative joints,
+            # grouping/padding and gripper semantics, before exposing a chunk.
+            max_error = 0.0
+            for key, expected in absolute_prefix.items():
+                actual = results[0][key][:, :delay_steps].float().cpu()
+                reference = torch.as_tensor(expected, dtype=torch.float32)[:delay_steps].unsqueeze(0)
+                if delay_steps:
+                    max_error = max(max_error, float((actual-reference).abs().max()))
+                    if not torch.allclose(actual, reference, rtol=1e-4, atol=2e-4):
+                        raise RuntimeError('RTC committed prefix failed physical-coordinate roundtrip: '+key)
             timing.update(rtc=True, rtc_prefix_steps=prefix.shape[1], rtc_delay_steps=delay_steps)
+            timing['rtc_hard_prefix_max_error'] = max_error
             return results[0], timing
 
     def forward_batch(self, batch: dict) -> dict:
