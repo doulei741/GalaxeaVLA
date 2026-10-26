@@ -308,6 +308,12 @@ class G05Policy(BasePolicy):
         if _bar_rows:
             log_box(logger, "🔧  BAR Config", _bar_rows)
 
+        lora_cfg = model_cfg.get("lora", {})
+        if lora_cfg.get("enabled", False):
+            from .lora import configure_lora
+            self.lora_modules = configure_lora(self, lora_cfg)
+            logger.info(f"LoRA enabled on {len(self.lora_modules)} projections; base parameters frozen")
+
     def _get_runtime_action_token_config(self) -> Dict[str, Any]:
         token_configs = getattr(self.processor, "token_configs", None)
         if isinstance(token_configs, dict):
@@ -903,6 +909,7 @@ class G05Policy(BasePolicy):
             )
             _sync_if_cuda_available()
             timing["fm_action_ms"] = (time.monotonic() - t_fm0) * 1000.0
+            results["action_source"] = "fm"
 
         # AR action (discrete)
         if self.discrete_action:
@@ -972,6 +979,7 @@ class G05Policy(BasePolicy):
             results["decoded_action_tokens"] = decoded_tokens
             if "action" not in results:
                 results["action"] = results["ar_action"]
+                results["action_source"] = "ar"
 
             if action_gt is not None:
                 results.update(

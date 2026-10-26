@@ -7,7 +7,7 @@ defaults:
   - g05
   - _self_
 
-pretrained_ckpt: /efm-vepfs/group-jt/research/lyc/CruxAI/checkpoints/g05_pretrain_mem.pt
+pretrained_ckpt: ${oc.env:G05_MEM_CKPT,checkpoints/g05_pretrain_mem.pt}
 
 model_arch:
   action_expert:

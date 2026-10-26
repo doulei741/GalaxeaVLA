@@ -209,7 +209,13 @@ class Qwen3_5VisionAttention(nn.Module):
 
         seq_length = query_states.shape[0]
 
-        if _flash_attn_varlen is not None:
+        use_flash_attn = _flash_attn_varlen is not None and query_states.is_cuda
+        if use_flash_attn:
+            major, _ = torch.cuda.get_device_capability(query_states.device)
+            # FA4 backward requires Hopper or newer; A100 must use SDPA here.
+            use_flash_attn = major >= (9 if _flash_attn_backend == "fa4" else 8)
+
+        if use_flash_attn:
             cu_seqlens_cuda = cu_seqlens.cuda() if not cu_seqlens.is_cuda else cu_seqlens
             max_seqlen = (cu_seqlens_cuda[1:] - cu_seqlens_cuda[:-1]).max().item()
             if _flash_attn_backend == "fa4":
@@ -240,7 +246,7 @@ class Qwen3_5VisionAttention(nn.Module):
         else:
             if not _VISION_FLASH_ATTN_WARNED:
                 logger.warning(
-                    "flash_attn not installed — vision attention uses SDPA fallback. "
+                    "No compatible flash_attn backend — vision attention uses SDPA fallback. "
                     "For Hopper/Blackwell GPUs (H100/B200), install FA4: "
                     "pip install flash-attn-4. For Ampere/Ada (A100/RTX4090), "
                     "install FA2: pip install flash-attn --no-build-isolation"

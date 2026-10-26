@@ -1,0 +1,25 @@
+# This file is part of G05_A1Z, licensed under the Galaxea Dynamics A1Z License Agreement.
+# See LICENSE.txt in the project root; upstream components retain their applicable licenses.
+
+# Dedicated dual A1Z routing. Reuse the explicit 6+1 / 6+1 schema only.
+_target_: g05.data.mixture_lerobot_dataset.MixtureLerobotDataset
+use_weight_normalization: true
+use_weight_for_sampling: false
+action_size: 32
+past_action_size: 0
+obs_size: 1
+obs_stride_second: 0.0
+val_set_proportion: 0.05
+is_training_set: true
+processors:
+  galaxea_a1z: ${oc.load:configs/data/r1lite.yaml,processors.galaxea_r1lite}
+embodiment_datasets:
+  galaxea_a1z:
+    type: g05.data.galaxea_lerobot_dataset.GalaxeaLerobotDataset
+    embodiment_type: galaxea_a1z
+    lerobot_ds_version: '2.1'
+    shape_meta: ${oc.load:configs/data/r1lite.yaml,processors.galaxea_r1lite.shape_meta}
+    dataset_groups:
+    - weight: 1.0
+      dataset_dirs:
+      - ${oc.env:A1Z_DATASET,../data/a1z_v21}

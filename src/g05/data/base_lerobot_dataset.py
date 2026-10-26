@@ -221,6 +221,19 @@ class BaseLerobotDataset(torch.utils.data.Dataset):
                 else:
                     episodes.update({meta.repo_id: list(range(split_idx, meta.total_episodes))})
 
+        import os, json
+        explicit_split = os.environ.get("G05_FIXED_SPLIT_JSON")
+        if explicit_split:
+            if lerobot_ds_version != "2.1" or len(metas) != 1:
+                raise RuntimeError("Fixed split requires the single validated V2.1 dataset")
+            spec = json.loads(Path(explicit_split).read_text())
+            train_ids, val_ids = spec["train_episodes"], spec["validation_episodes"]
+            if (set(train_ids) & set(val_ids) or len(set(train_ids + val_ids)) != metas[0].total_episodes
+                    or sorted(train_ids + val_ids) != list(range(metas[0].total_episodes))):
+                raise RuntimeError("Invalid fixed episode split")
+            chosen = train_ids if self.is_training_set else val_ids
+            episodes = {metas[0].repo_id: chosen}
+            logger.info("Fixed episode split: training=%s, selected=%s", self.is_training_set, chosen)
         if lerobot_ds_version == "3.0":
             episodes = None
 

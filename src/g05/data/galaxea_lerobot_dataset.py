@@ -170,7 +170,7 @@ class GalaxeaLerobotDataset(BaseLerobotDatasetV3):
             return self._end_idx - self._start_idx
 
     def _get_additional_data(self, sample, lerobot_sample):
-        sample["coarse_task"] = lerobot_sample["coarse_task"]
+        sample["coarse_task"] = lerobot_sample.get("coarse_task", lerobot_sample["task"])
         return sample
 
     def __getitem__(self, idx):

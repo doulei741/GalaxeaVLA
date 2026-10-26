@@ -1,0 +1,71 @@
+# This file is part of G05_A1Z, licensed under the Galaxea Dynamics A1Z License Agreement.
+# See LICENSE.txt in the project root; upstream components retain their applicable licenses.
+
+# LeRobot v2.1: one A1Z left arm (6 joints + gripper) and two RGB cameras.
+_target_: g05.data.mixture_lerobot_dataset.MixtureLerobotDataset
+use_weight_normalization: true
+use_weight_for_sampling: false
+action_size: 32
+past_action_size: 0
+obs_size: 1
+obs_stride_second: 0.0
+val_set_proportion: 0.05
+is_training_set: true
+processors:
+  galaxea_a1z:
+    shape_meta:
+      action:
+      - {key: left_arm, lerobot_key: action.left_arm, start_index: 0, raw_shape: 6, shape: 6, time_offset: 0}
+      - {key: left_gripper, lerobot_key: action.left_gripper, start_index: 0, raw_shape: 1, shape: 1, time_offset: 0}
+      state:
+      - {key: left_arm, lerobot_key: observation.state.left_arm, start_index: 0, raw_shape: 6, shape: 6, time_offset: 0}
+      - {key: left_gripper, lerobot_key: observation.state.left_gripper, start_index: 0, raw_shape: 1, shape: 1, time_offset: 0}
+      images:
+      - key: head_rgb
+        camera_type: exterior
+        lerobot_key: observation.images.head_rgb
+        start_index: 0
+        raw_shape: [3, 480, 640]
+        shape: [3, 224, 224]
+        time_offset: 0
+      - key: left_wrist_rgb
+        camera_type: wrist_left
+        lerobot_key: observation.images.left_wrist_rgb
+        start_index: 0
+        raw_shape: [3, 480, 640]
+        shape: [3, 224, 224]
+        time_offset: 0
+    action_state_transforms:
+    - _target_: g05.data_processor.transforms.relative_action.RelativeJointTransform
+      keys: [left_arm]
+    train_transforms:
+      head_rgb: ${oc.load:configs/data/_transforms.yaml,train_head}
+      left_wrist_rgb: ${oc.load:configs/data/_transforms.yaml,train_wrist}
+    val_transforms:
+      head_rgb: ${oc.load:configs/data/_transforms.yaml,val}
+      left_wrist_rgb: ${oc.load:configs/data/_transforms.yaml,val}
+    norm_default_mode: z-score-tail
+    norm_exception_mode:
+      action: {left_gripper: q01/q99}
+      state: {left_gripper: q01/q99}
+    action_filter:
+      _target_: g05.data_processor.transforms.action_filter.DummyActionFilter
+    action_state_merger:
+      _target_: g05.data_processor.transforms.action_state_merger.PaddingActionMerger
+      merge: true
+      max_action_shape_meta: ${oc.load:configs/data/parts_meta/gripper_wbc.yaml,parts_meta}
+      max_state_shape_meta: ${oc.load:configs/data/parts_meta/gripper_wbc.yaml,parts_meta}
+    num_obs_steps: 1
+    use_stepwise_action_norm: true
+    drop_high_level_prob: 1.0
+    use_zh_instruction: false
+embodiment_datasets:
+  galaxea_a1z:
+    type: g05.data.galaxea_lerobot_dataset.GalaxeaLerobotDataset
+    embodiment_type: galaxea_a1z
+    lerobot_ds_version: '2.1'
+    shape_meta: ${oc.load:configs/data/a1z_single_left.yaml,processors.galaxea_a1z.shape_meta}
+    dataset_groups:
+    - weight: 1.0
+      dataset_dirs:
+      - ${oc.env:A1Z_DATASET}

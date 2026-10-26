@@ -469,9 +469,13 @@ def load_state_dict_safely(
     # it runs. Reproduce the old assign=False copy_into semantics by casting checkpoint
     # tensors to the dtype expected by the model; meta param dtype is defined at
     # instantiation time and defaults to fp32 for nn.Module.
-    for k in list(update_dict.keys()):
-        if k in local_state and update_dict[k].dtype != local_state[k].dtype:
-            update_dict[k] = update_dict[k].to(local_state[k].dtype)
+    # Inference-only exports already use the final mixed precision layout. Keep
+    # their dtypes on the meta-device path to avoid expanding BF16 weights back
+    # to FP32 on a 24 GB GPU. Training keeps the original FP32 alignment.
+    if not load_config.get("preserve_checkpoint_dtype", False):
+        for k in list(update_dict.keys()):
+            if k in local_state and update_dict[k].dtype != local_state[k].dtype:
+                update_dict[k] = update_dict[k].to(local_state[k].dtype)
 
     msg = model.load_state_dict(update_dict, strict=False, assign=has_meta)
     # Ensure lm_head weights are shared with embed_tokens for old/new model structures.
@@ -638,6 +642,9 @@ def load_model_from_checkpoint(
         if token_row_remap is not None:
             load_config["token_row_remap"] = token_row_remap
 
+    from g05.models.g05.lora import validate_lora_checkpoint
+    validate_lora_checkpoint(model, state_dict,
+                             allow_base=load_config.get("allow_missing_lora", False))
     load_state_dict_safely(
         model,
         state_dict,
@@ -768,6 +775,11 @@ def fix_optimizer_state_after_resume(optimizer) -> int:
                 continue
             need_reset = False
             for k, v in state.items():
+                # Adam's scalar update counter is metadata, not a parameter-shaped moment.
+                if k == "step":
+                    if isinstance(v, torch.Tensor) and v.numel() != 1:
+                        raise ValueError("Optimizer step counter must be scalar")
+                    continue
                 if isinstance(v, torch.Tensor):
                     if v.is_floating_point() and v.dtype != p.dtype:
                         state[k] = v.to(dtype=p.dtype)

@@ -95,6 +95,8 @@ def setup(cfg, device: str = "cuda"):
         cfg.ckpt_path,
         device=device,
         extra_prefixes=["normalizer."],
+        load_config={"preserve_checkpoint_dtype": True},
+        use_meta_device=True,  # Load checkpoint weights without a second full FP32 copy.
         eval_mode=False,  # Defer until after bf16 conversion and fp32_params.
     )
 
@@ -259,6 +261,37 @@ def _validate_obs(raw_obs: dict, processor) -> None:
 # ──────── obs -> preprocess input construction ────────
 
 
+def validated_history(raw_obs, processor, count):
+    """Opt-in one-second history for the audited six-observation checkpoint.
+
+    Existing single-frame clients retain their old behavior. This does not
+    silently change control clients or invent historical sensor values.
+    """
+    frames = raw_obs.get('observation_history')
+    if frames is None:
+        return None
+    if count != 6 or not isinstance(frames, list) or len(frames) != count:
+        raise ValueError('History diagnostic requires exactly six observations')
+    offsets = np.asarray(raw_obs.get('history_offsets_s', []), dtype=float)
+    if offsets.shape != (count,) or not np.isfinite(offsets).all():
+        raise ValueError('Invalid history timestamps')
+    if not np.allclose(offsets, np.arange(-5, 1), atol=.15, rtol=0):
+        raise ValueError('Expected one-second history spacing, oldest first')
+    for frame in frames:
+        _validate_obs(dict(raw_obs, images=frame['images'], state=frame['state']), processor)
+        for group in ('images', 'state'):
+            for key, value in frame[group].items():
+                if not np.isfinite(value).all():
+                    raise ValueError('Non-finite history: ' + key)
+                if value.shape != raw_obs[group][key].shape:
+                    raise ValueError('History shape mismatch: ' + key)
+    for group in ('images', 'state'):
+        for key, value in raw_obs[group].items():
+            if not np.array_equal(frames[-1][group][key], value):
+                raise ValueError('History last frame must equal current observation')
+    return frames
+
+
 def build_obs_dict(raw_obs: dict, processor) -> dict:
     """Build the processor.preprocess input from client raw observations.
 
@@ -267,10 +300,12 @@ def build_obs_dict(raw_obs: dict, processor) -> dict:
     transforms. The time dimension is filled with dummy actions for num_obs_steps
     only so the merger can produce action_dim_is_pad.
     """
+    raw_obs = checkpoint_observation(raw_obs, processor)
     _validate_obs(raw_obs, processor)
 
     p = resolve_processor(processor, raw_obs)
     num_obs_steps = p.num_obs_steps
+    history = validated_history(raw_obs, processor, num_obs_steps)
     action_horizon = getattr(p, "action_horizon", num_obs_steps)
 
     # Keep only keys defined in shape_meta, matching dataset.__getitem__ behavior.
@@ -305,6 +340,11 @@ def build_obs_dict(raw_obs: dict, processor) -> dict:
     }
     if "coarse_task" in raw_obs:
         data["coarse_task"] = raw_obs["coarse_task"]
+    if history is not None:
+        data['images'] = {k: torch.from_numpy(np.stack([f['images'][k] for f in history]))
+                          for k in expected_img_keys}
+        data['state'] = {k: torch.from_numpy(np.stack([f['state'][k] for f in history])).float()
+                         for k in expected_state_keys}
     if "plan" in raw_obs:
         data["plan"] = raw_obs["plan"]
     frequency = raw_obs.get("frequency", 15)
@@ -362,17 +402,16 @@ class ChunkedPolicyWrapper:
             actions = await asyncio.to_thread(self.inferencer.infer, [obs_dict])
             action = actions[0]
             self._cot_text = action.pop("_cot_text", None)
-            # Drop keys the AR head did not confidently predict. The protocol
-            # returns only predicted keys; each client fills/holds missing keys
-            # itself (it knows its own expected key set). Generalizes beyond
-            # gripper to any absent action part.
+            # Only AR-selected outputs carry these raw-key omissions. FM
+            # outputs must not be filtered using the separate AR prediction.
             absent_keys = action.pop("_absent_keys", set())
-            for key in absent_keys:
-                action.pop(key, None)
-            if absent_keys:
+            dropped_keys = set(absent_keys).intersection(action)
+            for key in dropped_keys:
+                del action[key]
+            if dropped_keys:
                 logger.warning(
                     "Dropped absent action keys %s (emb=%s); client must handle missing keys.",
-                    sorted(absent_keys),
+                    sorted(dropped_keys),
                     raw_obs.get("embodiment_type", "?"),
                 )
             self._cached_chunk = dict_apply(
@@ -400,6 +439,41 @@ class ChunkedPolicyWrapper:
         self._chunk_step = 0
 
 
+def summarize_chunk(chunk):
+    """Read-only diagnostic of the same inference; never changes serving index."""
+    summary = {}
+    for key in ('left_arm', 'right_arm', 'left_gripper', 'right_gripper'):
+        if key not in chunk:
+            continue
+        arr = np.asarray(chunk[key])
+        if arr.ndim != 2 or not np.isfinite(arr).all():
+            raise ValueError('Invalid diagnostic chunk: ' + key)
+        summary[key] = {
+            'shape': list(arr.shape),
+            'steps': {str(i): arr[i].tolist() for i in sorted({0, 8, 16, 31, len(arr)-1}) if 0 <= i < len(arr)},
+        }
+    return summary
+
+
+def build_handshake(processor, action_steps):
+    """Expose raw wire dimensions, not padded model/grouped dimensions."""
+    def shape_meta(p):
+        return {"action": [
+            {"key": str(m["key"]), "raw_shape": int(m["raw_shape"])}
+            for m in p.shape_meta["action"]
+        ]}
+
+    metadata = {"action_steps": action_steps}
+    if isinstance(processor, MixtureProcessor):
+        by_embodiment = {str(k): shape_meta(p) for k, p in processor.processors.items()}
+        metadata["shape_meta_by_embodiment"] = by_embodiment
+        if len(by_embodiment) == 1:
+            metadata["shape_meta"] = next(iter(by_embodiment.values()))
+    else:
+        metadata["shape_meta"] = shape_meta(processor)
+    return metadata
+
+
 async def handler(ws, inferencer, processor, action_steps=16):
     """Handle a single WebSocket connection.
 
@@ -409,7 +483,7 @@ async def handler(ws, inferencer, processor, action_steps=16):
     client = ws.remote_address
     logger.info(f"Client connected: {client} (action_steps={action_steps})")
 
-    await ws.send(packb({"action_steps": action_steps}))
+    await ws.send(packb(build_handshake(processor, action_steps)))
     policy = ChunkedPolicyWrapper(inferencer, processor, action_steps=action_steps)
 
     try:
@@ -423,6 +497,8 @@ async def handler(ws, inferencer, processor, action_steps=16):
                     continue
                 action, cot_text = await policy.get_action(raw_obs)
                 resp = {"action": action, "need_obs": policy.need_obs}
+                if raw_obs.get('__diagnostic_chunk__') is True:
+                    resp['diagnostic_chunk'] = summarize_chunk(policy._cached_chunk)
                 if cot_text is not None:
                     resp["cot_text"] = cot_text
                 await ws.send(packb(resp))
@@ -470,6 +546,36 @@ async def serve(
 # ──────── main ────────
 
 
+def checkpoint_embodiment(cfg, requested):
+    """Resolve the public A1Z name without relabeling checkpoint statistics."""
+    datasets = cfg.data.get("embodiment_datasets", {})
+    available = {str(item.embodiment_type) for item in datasets.values()}
+    if requested == "galaxea_a1z" and requested not in available:
+        # The pinned public base checkpoint stores this legacy key in its stats.
+        if "galaxea_r1lite" in available:
+            return "galaxea_r1lite"
+    return requested
+
+
+def expose_a1z_processor(processor, requested, selected):
+    """Add the public alias only after normalization has loaded under its old key."""
+    if requested == "galaxea_a1z" and selected == "galaxea_r1lite":
+        if not isinstance(processor, MixtureProcessor):
+            raise ValueError("The legacy A1Z base profile requires a mixture processor")
+        if "galaxea_a1z" in processor.processors:
+            raise ValueError("Refusing to replace an existing A1Z processor")
+        processor.processors["galaxea_a1z"] = processor.processors[selected]
+        processor._a1z_checkpoint_embodiment = selected
+
+
+def checkpoint_observation(raw_obs, processor):
+    """Keep the base model's internal identity while exposing A1Z on the wire."""
+    selected = getattr(processor, "_a1z_checkpoint_embodiment", None)
+    if selected and raw_obs.get("embodiment_type") == "galaxea_a1z":
+        return dict(raw_obs, embodiment_type=selected)
+    return raw_obs
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="WebSocket policy server (training-inference consistent)"
@@ -497,8 +603,9 @@ def main():
 
     # Support eval_embodiment=<embodiment_type> filtering to a single embodiment_type.
     eval_embodiment = cfg.get("eval_embodiment", None)
-    if eval_embodiment and "embodiment_datasets" in cfg.data:
-        filter_embodiment(cfg, eval_embodiment)
+    selected_embodiment = checkpoint_embodiment(cfg, eval_embodiment)
+    if selected_embodiment and "embodiment_datasets" in cfg.data:
+        filter_embodiment(cfg, selected_embodiment)
 
     # Use the unified Rich format from overwatch to avoid basicConfig behavior
     # depending on import-time side effects.
@@ -511,6 +618,7 @@ def main():
     print_banner(subtitle="Policy Server")
 
     policy, processor = setup(cfg, device=args.device)
+    expose_a1z_processor(processor, eval_embodiment, selected_embodiment)
     logger.info("Model and processor loaded on %s.", args.device)
 
     asyncio.run(

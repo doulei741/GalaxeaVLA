@@ -1,0 +1,28 @@
+# @package _global_
+# This file is part of G05_A1Z, licensed under the Galaxea Dynamics A1Z License Agreement.
+# See LICENSE.txt in the project root; upstream components retain their applicable licenses.
+
+defaults:
+- a1z
+- override /data: a1z_single_left
+- _self_
+
+# Full fine-tuning from the pretrained G0.5 checkpoint.
+model:
+  batch_size: 2
+  num_workers: 4
+  learning_rate: 4.0e-05
+  warmup_steps: 200
+  max_epochs: null
+  max_steps: 30000
+  processor:
+    num_input_cameras: 2
+    num_output_cameras: 2
+    camera_size_config:
+      exterior: [256, 256]
+      wrist_left: [256, 256]
+  model_arch:
+    lora:
+      enabled: false
+    vla_training_strategy: vla-full-train
+batch_size_val: 2

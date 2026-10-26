@@ -1530,7 +1530,16 @@ class BaseLerobotDatasetV3(BaseLerobotDataset):
         total_episodes = 0
         for dataset in self.multi_dataset._datasets:
             data_dir = dataset.root / "data"
-            parquet_files.extend(sorted(data_dir.rglob("*.parquet")))
+            # V2.1's reader has already selected complete train/val episodes.
+            # Scanning the root again would silently include held-out labels.
+            selected_episodes = getattr(dataset, "episodes", None)
+            if self.lerobot_ds_version == "2.1" and selected_episodes is not None:
+                parquet_files.extend(
+                    dataset.root / dataset.meta.get_data_file_path(episode)
+                    for episode in selected_episodes
+                )
+            else:
+                parquet_files.extend(sorted(data_dir.rglob("*.parquet")))
             total_frames += int(getattr(dataset, "num_frames", 0))
             total_episodes += int(getattr(dataset, "num_episodes", 0))
 

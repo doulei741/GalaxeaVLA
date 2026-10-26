@@ -222,6 +222,9 @@ class ARHelper:
 
         shift_labels_masked = shift_labels[mask]
         shift_hidden_masked = shift_hidden.flatten(0, 1)[mask]
+        # Final norms can emit fp32 even for BF16 weights. Autocast is disabled
+        # here, so both fused and eager linear CE need an explicit dtype match.
+        shift_hidden_masked = shift_hidden_masked.to(model.vlm.output_proj.weight.dtype)
 
         # Dual path: FLCE saves memory; eager keeps logits for log-step metrics.
         # MetricsCollector.on_forward_start sets _need_full_logits=True before log

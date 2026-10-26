@@ -94,6 +94,13 @@ def _apply_action_tokenizer_sidecar(cfg: DictConfig, run_dir: Path) -> bool:
     if not local_at.exists():
         return False
 
+    # Nested OmegaConf.update on an interpolation alias can replace the alias
+    # with a partial dict and silently lose _target_ / tokenizer architecture.
+    for parent_key, leaf in (("model", "tokenizer"), ("model.model_arch", "AT_CONFIG")):
+        parent = OmegaConf.select(cfg, parent_key)
+        if parent is not None and leaf in parent and OmegaConf.is_interpolation(parent, leaf):
+            resolved = OmegaConf.to_container(parent[leaf], resolve=False)
+            OmegaConf.update(cfg, parent_key + "." + leaf, resolved, merge=False)
     patched = False
     for key in (
         "tokenizer.vq_config.ckpt_dir",
@@ -191,11 +198,12 @@ def load_config_from_run_dir(run_dir: Path, ckpt_path: str, overrides: list[str]
     # register_default_resolvers already handles oc.load, eval, split, etc.
     # We only need to add Hydra built-ins (now, oc.env) that aren't in register_default_resolvers.
     _register_hydra_builtin_resolvers()
+    if overrides:
+        cfg = OmegaConf.merge(cfg, OmegaConf.from_dotlist(overrides))
     cfg = OmegaConf.create(OmegaConf.to_container(cfg, resolve=True))
     OmegaConf.set_struct(cfg, False)
 
     if overrides:
-        cfg = OmegaConf.merge(cfg, OmegaConf.from_dotlist(overrides))
         logger.info(f"{_GREEN}⚙️  Applied {len(overrides)} override(s): {overrides}{_RESET}")
 
     logger.info(f"{_GREEN}✅ Config loaded successfully{_RESET}")

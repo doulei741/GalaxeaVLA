@@ -70,6 +70,8 @@ from utils.preflight import build_filter_str, run_preflight_checks
 from utils.eval_snapshot import save_train_snapshot
 from utils.train_eval import PeriodicEvaluator
 
+from utils.epoch299_runtime import save_training_checkpoint, record_metrics, audit_optimizer, FixedEvaluator
+
 register_default_resolvers()
 
 # Flag to enable first batch tokenizer evaluation for debugging
@@ -568,6 +570,7 @@ def finetune(cfg: DictConfig):
             extra_prefixes=["normalizer."],
             eval_mode=False,
             return_full_checkpoint=True,
+            load_config={"allow_missing_lora": not bool(cfg.resume_ckpt)},
         )
     else:
         model: BasePolicy = instantiate(cfg.model.model_arch)
@@ -806,7 +809,7 @@ def finetune(cfg: DictConfig):
         action_collate_fn = None
 
     dl_num_workers = cfg.model.num_workers
-    dl_prefetch_factor = cfg.model.get("prefetch_factor", 2)
+    dl_prefetch_factor = cfg.model.get("prefetch_factor", 2) if dl_num_workers > 0 else None
 
     train_dataloader = DataLoader(
         train_dataset,
@@ -815,7 +818,7 @@ def finetune(cfg: DictConfig):
         shuffle=False,
         num_workers=dl_num_workers,
         pin_memory=cfg.model.pin_memory,
-        persistent_workers=cfg.model.persistent_workers,
+        persistent_workers=bool(cfg.model.persistent_workers and dl_num_workers > 0),
         worker_init_fn=worker_init_fn,
         collate_fn=action_collate_fn,
         prefetch_factor=dl_prefetch_factor,
@@ -827,7 +830,7 @@ def finetune(cfg: DictConfig):
         shuffle=False,
         num_workers=dl_num_workers,
         pin_memory=cfg.model.pin_memory,
-        persistent_workers=cfg.model.persistent_workers,
+        persistent_workers=bool(cfg.model.persistent_workers and dl_num_workers > 0),
         worker_init_fn=worker_init_fn,
         collate_fn=action_collate_fn,
         prefetch_factor=dl_prefetch_factor,
@@ -875,7 +878,7 @@ def finetune(cfg: DictConfig):
         cfg.logger.log_steps = 1
     elif cfg.model.max_epochs:
         assert not cfg.model.max_steps, "Cannot set both `max_epochs` and `max_steps`!"
-        action_steps_per_epoch = len(train_dataloader) // cfg.model.grad_accumulation_steps
+        action_steps_per_epoch = math.ceil(len(train_dataloader) / cfg.model.grad_accumulation_steps)
         max_steps = int(math.ceil(action_steps_per_epoch * cfg.model.max_epochs))
     else:
         max_steps = cfg.model.max_steps
@@ -978,10 +981,7 @@ def finetune(cfg: DictConfig):
         optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
         _reset_count = fix_optimizer_state_after_resume(optimizer)
         if _reset_count > 0:
-            logger.warning(
-                f"Reset optimizer state for {_reset_count} params due to shape mismatch "
-                f"between checkpoint and current model (e.g., vocab size changed)."
-            )
+            raise RuntimeError(f"Exact resume rejected: {_reset_count} optimizer states required reset")
         scheduler.load_state_dict(checkpoint["scheduler_state_dict"])
         if use_ema:
             try:
@@ -997,6 +997,9 @@ def finetune(cfg: DictConfig):
         epoch = 0
         action_batch_idx = 0
         batch_idx = 0
+
+    if _dry_run:
+        max_steps = step + 1  # one actual optimizer update, including a resumed dry run
 
     # Initialize MFU Tracker
     mfu_tracker = None
@@ -1113,6 +1116,12 @@ def finetune(cfg: DictConfig):
     accelerator.wait_for_everyone()
     last_action_loss = None
     # Train!
+    if os.environ.get("G05_FIXED_SPLIT_JSON"):
+        evaluator = FixedEvaluator(evaluator)
+        if not cfg.resume_ckpt:
+            baseline = evaluator.evaluate(unwrap_model(model), accelerator, 0)
+            baseline.pop("_eval_time_sec", None)
+            record_metrics(output_dir, 0, baseline)
     logger.info("Starting training...")
     training_done = False
     with tqdm.tqdm(initial=step, total=max_steps, leave=False, dynamic_ncols=True) as progress:
@@ -1181,7 +1190,8 @@ def finetune(cfg: DictConfig):
                     latest_action_eval_batch = batch
 
                 # Turn off sync when is not optimizer step
-                is_optimizer_step = (batch_idx + 1) % cfg.model.grad_accumulation_steps == 0
+                accumulation_target = min(cfg.model.grad_accumulation_steps, len(train_dataloader) - (batch_idx // cfg.model.grad_accumulation_steps) * cfg.model.grad_accumulation_steps)
+                is_optimizer_step = ((batch_idx + 1) % cfg.model.grad_accumulation_steps == 0 or batch_idx + 1 == len(train_dataloader))
                 sync_ctx = model.no_sync() if not is_optimizer_step else nullcontext()
                 with sync_ctx:
                     with accelerator.autocast():
@@ -1192,14 +1202,18 @@ def finetune(cfg: DictConfig):
                         loss, loss_value_dict = model(batch)
                         last_action_loss = loss.item()
                     # Normalize loss to account for gradient accumulation
-                    normalized_loss = loss / cfg.model.grad_accumulation_steps
+                    if not torch.isfinite(loss).item():
+                        raise RuntimeError(f"Nonfinite loss at optimizer step {step}")
+                    normalized_loss = loss / accumulation_target
                     normalized_loss.backward()
 
                 batch_idx += 1
 
                 if is_optimizer_step:
+                    if step == 0:
+                        audit_optimizer(unwrap_model(model), optimizer, output_dir)
                     grad_norm = torch.nn.utils.clip_grad_norm_(
-                        model.parameters(), cfg.model.max_grad_norm
+                        model.parameters(), cfg.model.max_grad_norm, error_if_nonfinite=True
                     )
                     optimizer.step()
                     scheduler.step()
@@ -1229,7 +1243,7 @@ def finetune(cfg: DictConfig):
                     step += 1
 
                     # Log metrics on optimizer steps
-                    if step % cfg.logger.log_steps == 0 and tracker_type != "none":
+                    if (step % cfg.logger.log_steps == 0 or step == max_steps) and tracker_type != "none":
                         # Ensure values are plain Python numbers
                         loss_log_dict = {
                             k: (v.item() if hasattr(v, "item") else float(v))
@@ -1241,6 +1255,7 @@ def finetune(cfg: DictConfig):
                             "grad_norm": grad_norm.item(),
                         }
                         log_dict.update(loss_log_dict)
+                        log_dict["total_loss"] = float(action_loss_value)
 
                         _unwrapped = unwrap_model(model)
                         # Grad-accum-aware micro-batch means, logged separately for action/cot/caption.
@@ -1252,7 +1267,7 @@ def finetune(cfg: DictConfig):
                         if "cot" in _acc:
                             log_dict["train/cot_accuracy"] = _acc["cot"]
 
-                        if step % cfg.eval_steps == 0:
+                        if step % cfg.eval_steps == 0 or step == max_steps:
                             _train_time_in_period = time.time() - _period_train_start
                             if overfit_batch is not None and latest_action_eval_batch is not None:
                                 logger.info(
@@ -1291,13 +1306,14 @@ def finetune(cfg: DictConfig):
                             log_dict.update(global_monitor.get_metrics())
 
                         accelerator.log(log_dict, step=step)
+                        record_metrics(output_dir, step, log_dict)
 
                 # Periodic sync to catch CUDA errors early
                 if step > 0 and (step % 1000) == 0:
                     torch.cuda.synchronize()
 
                 # Save checkpoint in the main process
-                if step > 0 and (step % cfg.checkpointing_steps) == 0 and not _dry_run:
+                if step > 0 and is_optimizer_step and (step % cfg.checkpointing_steps == 0 or step == max_steps) and not _dry_run:
                     if accelerator.is_main_process:
                         logger.info(f"Saving model checkpoint for step {step} ...")
                         save_training_checkpoint(
@@ -1318,12 +1334,25 @@ def finetune(cfg: DictConfig):
                     accelerator.wait_for_everyone()
 
                 # Stop training when max_steps is reached
-                if step >= max_steps:
+                if is_optimizer_step and step >= max_steps:
                     logger.info(f"Max step {max_steps} reached, stop training ...")
                     training_done = True
                     break
 
             epoch += 1
+
+    if accelerator.is_main_process:
+        import json as _json
+        _model = unwrap_model(model)
+        _report = {
+            "step": int(step),
+            "trainable_parameters": sum(p.numel() for p in _model.parameters() if p.requires_grad),
+            "total_parameters": sum(p.numel() for p in _model.parameters()),
+            "peak_allocated_gib": torch.cuda.max_memory_allocated() / 2**30,
+            "peak_reserved_gib": torch.cuda.max_memory_reserved() / 2**30,
+        }
+        (Path(output_dir) / "training_resources.json").write_text(_json.dumps(_report, indent=2) + "\n")
+        logger.info(f"Training resources: {_report}")
 
     # Final checkpoint (inference-only: no optimizer/scheduler state)
     if not _dry_run and accelerator.is_main_process:

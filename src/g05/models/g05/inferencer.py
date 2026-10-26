@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import dataclasses
 import logging
+import threading
 import time
 from typing import Any
 
@@ -53,6 +54,10 @@ class PolicyInferencer:
         self.policy = policy
         self.processor = processor
         self.device = device
+        # WebSocket connections dispatch inference via asyncio.to_thread.
+        # The shared processor/model (including CUDA graphs and mutable caches)
+        # is not reentrant; serialize the complete inference transaction.
+        self._inference_lock = threading.Lock()
 
     # ──────── Public API ────────
 
@@ -66,6 +71,11 @@ class PolicyInferencer:
 
         Returns ``(results, {"preprocess_ms", "infer_ms", "postprocess_ms"})``.
         """
+        with self._inference_lock:
+            return self._infer_with_timing_locked(obs_dicts)
+
+    def _infer_with_timing_locked(self, obs_dicts: list[dict]) -> tuple[list[dict], dict[str, float]]:
+        """Caller holds _inference_lock until postprocessing is complete."""
         if not obs_dicts:
             return [], {"preprocess_ms": 0.0, "infer_ms": 0.0, "postprocess_ms": 0.0}
 
@@ -159,12 +169,27 @@ class PolicyInferencer:
         if "action_op_mask" in batch:
             item_batch["action_op_mask"] = batch["action_op_mask"][index : index + 1]
         action = sub_processor.postprocess(item_batch)["action"]
-        ar_absent_keys = batch.get("ar_absent_keys")
+        # AR omissions describe only the discrete prediction, never the FM
+        # tensor selected as the final action when both heads are enabled.
+        ar_absent_keys = (
+            batch.get("ar_absent_keys") if batch.get("action_source", "ar") == "ar" else None
+        )
         absent = (
             ar_absent_keys[index]
             if ar_absent_keys is not None and index < len(ar_absent_keys)
             else set()
         )
         if absent:
-            action["_absent_keys"] = absent
+            # AR uses grouped names (left_control); postprocess restores raw
+            # embodiment keys (left_arm / left_ee_pose). Map before filtering.
+            merger = getattr(sub_processor, "action_state_merger", None)
+            merge_spec = getattr(merger, "merge_spec", None) or {}
+            raw_absent = {
+                raw_key
+                for key in absent
+                for raw_key in merge_spec.get(key, [key])
+                if raw_key in action
+            }
+            if raw_absent:
+                action["_absent_keys"] = raw_absent
         return action

@@ -1,0 +1,31 @@
+# @package _global_
+# This file is part of G05_A1Z, licensed under the Galaxea Dynamics A1Z License Agreement.
+# See LICENSE.txt in the project root; upstream components retain their applicable licenses.
+
+defaults:
+- a1z
+- _self_
+
+model:
+  max_epochs: null
+  batch_size: 1
+  num_workers: 2
+  grad_accumulation_steps: 8
+  model_weights_to_bf16: true
+  enable_bf16_training: true
+  use_ema: false
+  use_torch_compile: false
+  learning_rate: 0.0001
+  find_unused_parameters: true
+  model_arch:
+    checkpoint_vision: false
+    checkpoint_vlm: true
+    checkpoint_action_expert: true
+    fm:
+      num_flow_samples: 1
+    lora:
+      enabled: true
+      rank: 8
+      alpha: 16
+      targets: [q_proj, k_proj, v_proj, o_proj, gate_proj, up_proj, down_proj]
+batch_size_val: 1

@@ -826,7 +826,10 @@ class LeRobotDataset(torch.utils.data.Dataset):
                 item[cam] = self.image_transforms(item[cam])
 
         # Add task as a string
-        task_idx = item["task_index"].item()
+        task_index_tensor = item["task_index"].reshape(-1)
+        if not torch.all(task_index_tensor == task_index_tensor[0]):
+            raise ValueError("task_index changes within one temporal query window")
+        task_idx = task_index_tensor[0].item()
         item["task"] = self.meta.tasks[task_idx]
         if "coarse_task_index" in item:
             coarse_task_index = item["coarse_task_index"].item()

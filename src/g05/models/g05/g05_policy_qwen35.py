@@ -38,6 +38,7 @@ class G05PolicyQwen35(G05Policy):
     @property
     def fp32_param_patterns(self) -> List[str]:
         return [
+            "lora_A", "lora_B",
             # vision embeddings (Qwen3.5 Conv3D + position embedding)
             "vision_tower.patch_embed.proj.weight",
             "vision_tower.patch_embed.proj.bias",
@@ -154,7 +155,7 @@ class G05PolicyQwen35(G05Policy):
             + [_t(*camera_size_config["wrist_left"])]
             + [_t(*camera_size_config["wrist_right"])]
         )
-        return per_camera * cfg.num_obs_steps
+        return per_camera[:n_cams] * cfg.num_obs_steps
 
     def estimate_training_flops_per_sample(self) -> int:
         """Qwen3.5 FLOPs: ViT uses pre-merge patches, no external projector, hybrid attention."""

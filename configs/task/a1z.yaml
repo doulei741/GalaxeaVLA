@@ -1,0 +1,25 @@
+# @package _global_
+# This file is part of G05_A1Z, licensed under the Galaxea Dynamics A1Z License Agreement.
+# See LICENSE.txt in the project root; upstream components retain their applicable licenses.
+
+defaults:
+- r1lite
+- override /data: a1z
+- _self_
+
+logger:
+  type: null
+  mode: offline
+tokenizer:
+  vq_config:
+    ckpt_dir: ${oc.env:A1Z_WORKSPACE}/checkpoints/action_tokenizer.pt
+model:
+  pretrained_ckpt: ${oc.env:A1Z_WORKSPACE}/checkpoints/g05-base/checkpoints/model_state_dict.pt
+  batch_size: 2
+  num_workers: 4
+  max_epochs: null
+  max_steps: 10000
+  use_pretrained_norm_stats: false
+  model_arch:
+    hf_processor_path: ${oc.env:A1Z_WORKSPACE}/checkpoints/qwen3_5_2b_base_processor
+batch_size_val: 2

@@ -1,0 +1,12 @@
+# @package _global_
+# This file is part of G05_A1Z, licensed under the Galaxea Dynamics A1Z License Agreement.
+# See LICENSE.txt in the project root; upstream components retain their applicable licenses.
+
+defaults:
+- a1z_lora
+- override /data: a1z_single_left
+- _self_
+model:
+  processor:
+    num_output_cameras: 2
+    num_input_cameras: 2
